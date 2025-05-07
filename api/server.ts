@@ -3,7 +3,7 @@ import registerTools from "./tools/index";
 
 const handler = initializeMcpApiHandler(
   (server) => {
-    // Register tools 
+    // Register tools
     server = registerTools(server);
   },
   {
@@ -11,7 +11,8 @@ const handler = initializeMcpApiHandler(
       tools: {
         // Documentation Category Tools
         listCategories: {
-          description: "List all available MeetingBaas documentation categories",
+          description:
+            "List all available MeetingBaas documentation categories",
           category: "Documentation",
         },
         getAllDocs: {
@@ -47,7 +48,8 @@ const handler = initializeMcpApiHandler(
           category: "Documentation",
         },
         getTypeScriptSdkCommonDocs: {
-          description: "Get Common TypeScript SDK methods and types documentation",
+          description:
+            "Get Common TypeScript SDK methods and types documentation",
           category: "Documentation",
         },
         getTypeScriptSdkBotsDocs: {
@@ -74,12 +76,24 @@ const handler = initializeMcpApiHandler(
           description: "Get documentation by category name",
           category: "Documentation",
         },
-        
+
+        // GitHub Repository Tools
+        listRepositories: {
+          description:
+            "List all publicly available GitHub repositories from Meeting-Baas organization",
+          category: "GitHub",
+        },
+        getRepositoryReadme: {
+          description:
+            "Get README.md file from a specific Meeting-Baas GitHub repository",
+          category: "GitHub",
+        },
+
         // Utility Tools
         docHelpAssistant: {
           description: "Echo a message with a Documentation Helper prefix",
           category: "Utility",
-        }
+        },
       },
     },
   }
