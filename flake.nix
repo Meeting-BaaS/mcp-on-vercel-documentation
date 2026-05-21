@@ -18,8 +18,8 @@
             pname = "mcp-on-vercel-documentation";
             version = "0.1.0";
             src = ./.;
-            nativeBuildInputs = [ pkgs.nodejs_20 pkgs.pnpm_8.configHook pkgs.makeWrapper ];
-            pnpmDeps = pkgs.pnpm_8.fetchDeps {
+            nativeBuildInputs = [ pkgs.nodejs_20 (pkgs.pnpmConfigHook.override { pnpm = pkgs.pnpm_8; }) pkgs.makeWrapper ];
+            pnpmDeps = (pkgs.fetchPnpmDeps.override { pnpm = pkgs.pnpm_8; }) {
               inherit (finalAttrs) pname version src;
               fetcherVersion = 2;
               hash = "sha256-OAjZ9C+BtpHgpSwxHFqz46Nzu+34Vpl9VplvHT+APTk=";
