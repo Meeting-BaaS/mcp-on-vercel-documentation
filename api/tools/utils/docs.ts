@@ -208,7 +208,7 @@ export function registerDocumentationTools(server: McpServer): McpServer {
   );
 
   // Also keep a generic tool for fetching by category
-  server.tool(
+  (server as any).tool(
     "getDocsByCategory",
     "Get documentation by category name",
     {

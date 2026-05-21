@@ -8,7 +8,7 @@ const handler = initializeMcpApiHandler(
   },
   {
     capabilities: {
-      tools: {
+      tools: ({
         // Documentation Category Tools
         listCategories: {
           description:
@@ -94,7 +94,7 @@ const handler = initializeMcpApiHandler(
           description: "Echo a message with a Documentation Helper prefix",
           category: "Utility",
         },
-      },
+      }) as any,
     },
   }
 );
