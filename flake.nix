@@ -9,7 +9,7 @@
       forAll = nixpkgs.lib.genAttrs systems;
       pkgsFor = s: nixpkgs.legacyPackages.${s};
     in {
-      # Standalone pnpm package. `pnpm build` is `tsc || true` → dist/server.js
+      # Standalone pnpm package. `pnpm build` is plain `tsc` → dist/server.js
       # (hermetic). The wrapper runs the compiled entry; secrets/PORT come from
       # the systemd unit's EnvironmentFile/environment.
       packages = forAll (s:
@@ -22,7 +22,7 @@
             pnpmDeps = (pkgs.fetchPnpmDeps.override { pnpm = pkgs.pnpm_8; }) {
               inherit (finalAttrs) pname version src;
               fetcherVersion = 2;
-              hash = "sha256-OAjZ9C+BtpHgpSwxHFqz46Nzu+34Vpl9VplvHT+APTk=";
+              hash = "sha256-4OV9V14Giahcgu9VJ7PaPHra2jAXFxn7BFqO8aam8FY=";
             };
             env = { CI = "true"; };
             buildPhase = ''

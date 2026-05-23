@@ -9,8 +9,9 @@ const server = http.createServer(async (req: IncomingMessage, res: ServerRespons
     // Add CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-meeting-baas-api-key, x-meetingbaas-apikey, x-api-key');
-    
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id');
+    res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id');
+
     if (req.method === 'OPTIONS') {
       res.writeHead(200);
       res.end();
@@ -29,9 +30,7 @@ const server = http.createServer(async (req: IncomingMessage, res: ServerRespons
 server.listen(PORT, () => {
   console.log(`MCP Server running on port ${PORT}`);
   console.log(`Available endpoints:`);
-  console.log(`  - GET/POST /mcp - MCP protocol endpoint`);
-  console.log(`  - GET /sse - Server-Sent Events endpoint`);
-  console.log(`  - POST /message - Message handling endpoint`);
+  console.log(`  - POST /mcp - MCP Streamable HTTP endpoint`);
 });
 
 // Graceful shutdown
