@@ -13,26 +13,21 @@ import { z } from "zod";
 // NB: NOT derived from BAAS_URL — the white-label host (docs.gmeetrecorder.com)
 // has no docs deployment / TLS SAN, so fetching there fails. BAAS_URL only
 // governs the server's own public URL (see lib/mcp-api-handler.ts).
+//
+// PUBLIC_DOCS is the browser-facing host used to build citable page links; it
+// always uses DOCS_HOST (a public host) even if DOCS_ORIGIN is an internal IP.
 // ---------------------------------------------------------------------------
 const DOCS_HOST = process.env.DOCS_HOST || "docs.meetingbaas.com";
 const DOCS_ORIGIN = process.env.DOCS_ORIGIN || `https://${DOCS_HOST}`;
+const PUBLIC_DOCS = `https://${DOCS_HOST}`;
 const docUrlFor = (category: string) => `${DOCS_ORIGIN}/llms/${category}`;
 
-// ---------------------------------------------------------------------------
-// Documentation categories — v2-first.
-//
-// Mirrors the source of truth `content/llm-config.ts` in the docs repo
-// (docs-v2). The top-level `api` is the LEGACY v1 reference; the current API is
-// `api-v2` and its per-section bundles. `calendars`/`webhooks` already point at
-// the api-v2 reference in llm-config.
-//
-// The api-v2 sub-bundles (api-v2/bots, …) are only reachable once the docs-v2
-// `[...path]` route joins segments with '/' (the join('-') bug). Verify they
-// 200 before relying on the sub-tools.
-//
-// Removed (returned empty stubs after the v2 migration): meetings, users,
-// typescript-sdk-{common,bots,calendars,webhooks}.
-// ---------------------------------------------------------------------------
+// Source-path → public page URL. "./content/docs/api-v2/reference/bots/x.mdx"
+// → "https://<host>/docs/api-v2/reference/bots/x" (drop trailing /index).
+const slugFromSource = (p: string) =>
+  p.replace(/^\.\/content\/docs\//, "").replace(/\.mdx$/, "").replace(/\/index$/, "");
+const pageUrl = (slug: string) => `${PUBLIC_DOCS}/docs/${slug}`;
+
 const DOC_CATEGORIES = {
   ALL: "all",
   API_V2: "api-v2",
@@ -52,16 +47,19 @@ const DOC_CATEGORIES = {
   SELF_HOSTING: "self-hosting",
   UPDATES: "updates",
 };
-
-// All category strings, for the generic getDocsByCategory enum.
 const ALL_CATEGORY_VALUES = Object.values(DOC_CATEGORIES) as [string, ...string[]];
+
+// The v2 API sections, for the index and slug→section routing.
+const V2_SECTIONS: { cat: string; tool: string; label: string }[] = [
+  { cat: DOC_CATEGORIES.API_V2_BOTS, tool: "getApiV2BotsDocs", label: "Bots" },
+  { cat: DOC_CATEGORIES.API_V2_CALENDARS, tool: "getApiV2CalendarsDocs", label: "Calendars" },
+  { cat: DOC_CATEGORIES.API_V2_CALLBACKS, tool: "getApiV2CallbacksDocs", label: "Callbacks" },
+  { cat: DOC_CATEGORIES.API_V2_WEBHOOKS, tool: "getApiV2WebhooksDocs", label: "Webhooks" },
+  { cat: DOC_CATEGORIES.API_V2_ZOOM_CREDENTIALS, tool: "getApiV2ZoomCredentialsDocs", label: "Zoom Credentials" },
+];
 
 // ---------------------------------------------------------------------------
 // In-memory TTL cache + single-flight + conditional revalidation.
-//
-// Docs only change on deploy, so a multi-minute TTL is plenty. On expiry we
-// revalidate with If-None-Match; a 304 refreshes the entry with zero body
-// transfer. Concurrent fetches of the same category share one request.
 // ---------------------------------------------------------------------------
 const CACHE_TTL_MS = Number(process.env.DOCS_CACHE_TTL_MS) || 12 * 60 * 1000;
 
@@ -69,17 +67,14 @@ type CacheEntry = { body: string; etag?: string; lastModified?: string; expires:
 const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<string>>();
 
+// Fetch a category's RAW bundle (cached). Returns markdown as the docs site emits it.
 async function loadCategory(category: string): Promise<string> {
   const now = Date.now();
   const cached = cache.get(category);
-
-  // Fresh cache hit — no outbound HTTP.
   if (cached && cached.expires > now) {
     console.log(`docs cache HIT (fresh): ${category}`);
     return cached.body;
   }
-
-  // Single-flight: collapse concurrent identical fetches into one request.
   const existing = inflight.get(category);
   if (existing) return existing;
 
@@ -92,27 +87,21 @@ async function loadCategory(category: string): Promise<string> {
     const response = await axios.get(url, {
       headers,
       maxRedirects: 5,
-      // 304 must reach us as a value, not an error; <500 stays non-throwing.
       validateStatus: (status) => status === 304 || status < 500,
     });
 
-    // Not modified — refresh TTL, reuse cached body, no transfer.
     if (response.status === 304 && cached) {
       cache.set(category, { ...cached, expires: now + CACHE_TTL_MS });
       console.log(`docs cache REVALIDATED (304): ${category}`);
       return cached.body;
     }
-
     if (response.status !== 200) {
-      // Don't cache non-200s (404 stub / transient). Surface, fall back to
-      // stale body if we have one.
       if (cached) {
         console.warn(`docs fetch ${response.status} for ${category}; serving stale cache`);
         return cached.body;
       }
       throw new Error(`HTTP ${response.status} from ${url}`);
     }
-
     const body =
       typeof response.data === "string" ? response.data : JSON.stringify(response.data);
     cache.set(category, {
@@ -129,24 +118,71 @@ async function loadCategory(category: string): Promise<string> {
   return fetchPromise;
 }
 
-// Helper that returns the MCP tool result for a category.
+// ---------------------------------------------------------------------------
+// Bundle post-processing: strip MDX/Fumadocs boilerplate and turn the
+// "### Source: ./content/docs/X.mdx" markers into citable public links.
+// ---------------------------------------------------------------------------
+function enrich(raw: string): string {
+  return raw
+    .replace(/\{\/\*[\s\S]*?\*\/\}\s*/g, "") // strip MDX comments (Fumadocs "generated by …")
+    .replace(
+      /^### Source:\s*(\.\/content\/docs\/\S+\.mdx)\s*$/gm,
+      (_m, p: string) => `**Source:** ${pageUrl(slugFromSource(p))}`
+    );
+}
+
+type DocPage = { slug: string; title: string; url: string; body: string };
+
+// Split a section bundle into individual pages. Anchored on the "### Source:"
+// markers (one per file); the page title is the "## " line just above it.
+function parsePages(raw: string): DocPage[] {
+  const lines = raw.split("\n");
+  const srcIdx: number[] = [];
+  lines.forEach((l, i) => {
+    if (/^### Source:\s*\.\/content\/docs\/\S+\.mdx/.test(l)) srcIdx.push(i);
+  });
+  const titleAbove = (si: number): number => {
+    let t = si - 1;
+    while (t >= 0 && !/^##\s+/.test(lines[t])) t--;
+    return t;
+  };
+  const pages: DocPage[] = [];
+  for (let k = 0; k < srcIdx.length; k++) {
+    const si = srcIdx[k];
+    const path = (lines[si].match(/(\.\/content\/docs\/\S+\.mdx)/) || [])[1] || "";
+    const slug = slugFromSource(path);
+    const ti = titleAbove(si);
+    const title = ti >= 0 ? lines[ti].replace(/^##\s+/, "").trim() : slug.split("/").pop() || slug;
+    const endExclusive = k + 1 < srcIdx.length ? Math.max(titleAbove(srcIdx[k + 1]), si + 1) : lines.length;
+    const bodyLines = lines.slice(si + 1, endExclusive);
+    while (bodyLines.length && (bodyLines[bodyLines.length - 1].trim() === "" || bodyLines[bodyLines.length - 1].trim() === "---")) {
+      bodyLines.pop();
+    }
+    pages.push({ slug, title, url: pageUrl(slug), body: enrich(bodyLines.join("\n")).trim() });
+  }
+  return pages;
+}
+
+const categoryForSlug = (slug: string): string | null => {
+  const m = slug.match(/^api-v2\/reference\/([^/]+)(?:\/|$)/);
+  return m ? `api-v2/${m[1]}` : null;
+};
+
+// Tool result for a whole category bundle (enriched).
 async function fetchDoc(category: string) {
   try {
-    const text = await loadCategory(category);
+    const text = enrich(await loadCategory(category));
     return { content: [{ type: "text" as const, text }] };
   } catch (error) {
     const stale = cache.get(category);
-    if (stale) {
-      return { content: [{ type: "text" as const, text: stale.body }] };
-    }
-    const errorMessage =
-      error instanceof Error ? error.message : "Unknown error occurred";
+    if (stale) return { content: [{ type: "text" as const, text: enrich(stale.body) }] };
+    const msg = error instanceof Error ? error.message : "Unknown error occurred";
     console.error(`Documentation error for '${category}':`, error);
     return {
       content: [
         {
           type: "text" as const,
-          text: `Error retrieving documentation for '${category}' from ${docUrlFor(category)}. Error: ${errorMessage}`,
+          text: `Error retrieving documentation for '${category}' from ${docUrlFor(category)}. Error: ${msg}`,
         },
       ],
     };
@@ -154,163 +190,138 @@ async function fetchDoc(category: string) {
 }
 
 export function registerDocumentationTools(server: McpServer): McpServer {
-  // List categories — v2-first, mirrors content/llm-config.ts.
   server.tool(
     "listCategories",
-    "List MeetingBaas documentation categories. The current API is v2 (api-v2); prefer it and its sub-sections. `api` is the legacy v1 reference.",
+    "List MeetingBaas documentation categories. The current API is v2 (api-v2); prefer it. Use getApiDocs for a small v2 index, then a section tool or getDocsPage for detail.",
+    {},
+    async () => ({
+      content: [
+        {
+          type: "text" as const,
+          text: `MeetingBaas Documentation (v2-first):
+
+START HERE: getApiDocs → a small INDEX of the v2 API (sections + endpoints + links).
+Then drill in with a section tool, or getDocsPage({ slug }) for ONE endpoint.
+
+v2 section tools: ${V2_SECTIONS.map((s) => s.tool).join(", ")}
+Full v2 dump (large, last resort): getApiV2FullDocs
+Other: getTypeScriptSdkDocs, getSdkDocs, getMcpServersDocs, getSelfHostingDocs, getTranscriptSeekerDocs, getSpeakingBotsDocs, getUpdatesDocs
+Legacy v1 (only if explicitly asked): getApiV1Docs
+Everything in one bundle (very large): getAllDocs`,
+        },
+      ],
+    })
+  );
+
+  // --- v2: index-first ---
+
+  // Headline API tool → compact INDEX (not the 88k dump). Keeps the chat fast.
+  server.tool(
+    "getApiDocs",
+    "Get an INDEX of the current MeetingBaas v2 API: sections and their endpoints with links — small and fast. Use this first, then call a section tool (e.g. getApiV2BotsDocs) or getDocsPage({ slug }) for the actual content. For the full v2 dump use getApiV2FullDocs (large).",
     {},
     async () => {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `MeetingBaas Documentation Categories (v2-first):
-
-CURRENT API (v2) — prefer these:
-- ${DOC_CATEGORIES.API_V2} - MeetingBaas API v2, the current API (use getApiDocs)
-- ${DOC_CATEGORIES.API_V2_BOTS} - Bots endpoints (create/list/manage bots, recording, chat)
-- ${DOC_CATEGORIES.API_V2_CALENDARS} - Calendars endpoints
-- ${DOC_CATEGORIES.API_V2_WEBHOOKS} - Webhooks endpoints
-- ${DOC_CATEGORIES.API_V2_CALLBACKS} - Callbacks endpoints
-- ${DOC_CATEGORIES.API_V2_ZOOM_CREDENTIALS} - Zoom credentials endpoints
-
-SDK & guides:
-- ${DOC_CATEGORIES.TYPESCRIPT_SDK} - TypeScript SDK
-- ${DOC_CATEGORIES.SDK} - SDK overview (client libraries)
-- ${DOC_CATEGORIES.MCP_SERVERS} - MCP servers
-- ${DOC_CATEGORIES.SELF_HOSTING} - Self-hosting
-- ${DOC_CATEGORIES.TRANSCRIPT_SEEKER} - Transcript Seeker
-- ${DOC_CATEGORIES.SPEAKING_BOTS} - Speaking Bots
-- ${DOC_CATEGORIES.UPDATES} - Product updates / changelog
-
-LEGACY (v1) — only if explicitly asked:
-- ${DOC_CATEGORIES.API_V1} - Legacy v1 API reference (use getApiV1Docs)
-
-Note: ${DOC_CATEGORIES.ALL} exists but is very large — prefer a scoped category above.`,
-          },
-        ],
-      };
+      const blocks: string[] = [
+        "# MeetingBaas API v2 — Index",
+        "Use a section tool for full detail, or getDocsPage({ slug }) for one endpoint.",
+        "",
+      ];
+      for (const s of V2_SECTIONS) {
+        blocks.push(`## ${s.label} — \`${s.tool}\``);
+        try {
+          const pages = parsePages(await loadCategory(s.cat));
+          for (const p of pages) {
+            blocks.push(`- ${p.title} — ${p.url}  \`slug: ${p.slug}\``);
+          }
+        } catch {
+          blocks.push(`- (index unavailable; call \`${s.tool}\`)`);
+        }
+        blocks.push("");
+      }
+      return { content: [{ type: "text" as const, text: blocks.join("\n") }] };
     }
   );
 
-  // --- Current API (v2) ---
+  // Per-page fetch — returns ONE endpoint's page (small), sliced from the
+  // cached section bundle (no extra docs round-trip once the section is warm).
+  (server as any).tool(
+    "getDocsPage",
+    "Fetch a SINGLE documentation page by slug (cheapest option). Get slugs from getApiDocs. Example slug: api-v2/reference/bots/createBot.",
+    {
+      slug: z
+        .string()
+        .describe("Page slug, e.g. 'api-v2/reference/bots/createBot' (as shown by getApiDocs)"),
+    },
+    async ({ slug }: { slug: string }) => {
+      const norm = slug.replace(/^\/?(docs\/)?/, "").replace(/\/$/, "").replace(/\.mdx$/, "");
+      const cat = categoryForSlug(norm) || DOC_CATEGORIES.API_V2;
+      try {
+        let pages = parsePages(await loadCategory(cat));
+        let page = pages.find((p) => p.slug === norm) || pages.find((p) => p.slug.endsWith(norm));
+        if (!page && cat !== DOC_CATEGORIES.API_V2) {
+          pages = parsePages(await loadCategory(DOC_CATEGORIES.API_V2));
+          page = pages.find((p) => p.slug === norm) || pages.find((p) => p.slug.endsWith(norm));
+        }
+        if (!page) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No page found for slug '${norm}'. Call getApiDocs to list valid slugs.`,
+              },
+            ],
+          };
+        }
+        return {
+          content: [
+            { type: "text" as const, text: `# ${page.title}\n\n**Source:** ${page.url}\n\n${page.body}` },
+          ],
+        };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "Unknown error";
+        return { content: [{ type: "text" as const, text: `Error fetching page '${norm}': ${msg}` }] };
+      }
+    }
+  );
 
-  // Headline API tool → v2.
+  // v2 section tools (scoped content with links).
+  server.tool("getApiV2BotsDocs", "Get v2 Bots API docs — create/list/manage bots, recording, chat. Start here for 'how do I send a bot?'.", {}, async () => fetchDoc(DOC_CATEGORIES.API_V2_BOTS));
+  server.tool("getApiV2CalendarsDocs", "Get v2 Calendars API docs — connections, events, calendar bots.", {}, async () => fetchDoc(DOC_CATEGORIES.API_V2_CALENDARS));
+  server.tool("getApiV2WebhooksDocs", "Get v2 Webhooks API docs.", {}, async () => fetchDoc(DOC_CATEGORIES.API_V2_WEBHOOKS));
+  server.tool("getApiV2CallbacksDocs", "Get v2 Callbacks API docs.", {}, async () => fetchDoc(DOC_CATEGORIES.API_V2_CALLBACKS));
+  server.tool("getApiV2ZoomCredentialsDocs", "Get v2 Zoom Credentials API docs.", {}, async () => fetchDoc(DOC_CATEGORIES.API_V2_ZOOM_CREDENTIALS));
+
+  // Full v2 dump — large; last resort.
   server.tool(
-    "getApiDocs",
-    "Get the MeetingBaas API documentation. Returns the CURRENT v2 API (api-v2). Use this for anything about sending/managing bots, calendars, webhooks, callbacks, or zoom credentials. Always prefer this over the legacy v1 tool.",
+    "getApiV2FullDocs",
+    "Get the ENTIRE v2 API reference in one bundle. Large (~90k tokens) — prefer getApiDocs (index) + section tools / getDocsPage. Use only when you truly need everything.",
     {},
     async () => fetchDoc(DOC_CATEGORIES.API_V2)
   );
 
-  server.tool(
-    "getApiV2BotsDocs",
-    "Get v2 Bots API documentation — creating/listing/managing bots, recording control, chat, screenshots. Use this for 'how do I send a bot?' type questions.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.API_V2_BOTS)
-  );
-
-  server.tool(
-    "getApiV2CalendarsDocs",
-    "Get v2 Calendars API documentation — calendar connections, events, and calendar-driven bots.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.API_V2_CALENDARS)
-  );
-
-  server.tool(
-    "getApiV2WebhooksDocs",
-    "Get v2 Webhooks API documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.API_V2_WEBHOOKS)
-  );
-
-  server.tool(
-    "getApiV2CallbacksDocs",
-    "Get v2 Callbacks API documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.API_V2_CALLBACKS)
-  );
-
-  server.tool(
-    "getApiV2ZoomCredentialsDocs",
-    "Get v2 Zoom Credentials API documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.API_V2_ZOOM_CREDENTIALS)
-  );
-
-  // --- Legacy API (v1) — deprecated ---
+  // Legacy v1 — deprecated.
   server.tool(
     "getApiV1Docs",
-    "DEPRECATED: Get the LEGACY v1 API documentation. Only use this if the user explicitly asks about the old v1 API. For everything else use getApiDocs (v2).",
+    "DEPRECATED: legacy v1 API documentation. Only if the user explicitly asks about v1; otherwise use getApiDocs (v2).",
     {},
     async () => fetchDoc(DOC_CATEGORIES.API_V1)
   );
 
-  // --- Topic bundles (v2-backed) ---
-  server.tool(
-    "getCalendarsDocs",
-    "Get Calendars documentation (v2 reference).",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.CALENDARS)
-  );
+  // Topic bundles.
+  server.tool("getCalendarsDocs", "Get Calendars documentation (v2 reference).", {}, async () => fetchDoc(DOC_CATEGORIES.CALENDARS));
+  server.tool("getWebhooksDocs", "Get Webhooks documentation (v2 reference).", {}, async () => fetchDoc(DOC_CATEGORIES.WEBHOOKS));
+  server.tool("getSdkDocs", "Get MeetingBaas SDK overview documentation.", {}, async () => fetchDoc(DOC_CATEGORIES.SDK));
+  server.tool("getTypeScriptSdkDocs", "Get TypeScript SDK documentation.", {}, async () => fetchDoc(DOC_CATEGORIES.TYPESCRIPT_SDK));
+  server.tool("getTranscriptSeekerDocs", "Get Transcript Seeker documentation.", {}, async () => fetchDoc(DOC_CATEGORIES.TRANSCRIPT_SEEKER));
+  server.tool("getSpeakingBotsDocs", "Get Speaking Bots documentation.", {}, async () => fetchDoc(DOC_CATEGORIES.SPEAKING_BOTS));
+  server.tool("getMcpServersDocs", "Get MCP servers documentation.", {}, async () => fetchDoc(DOC_CATEGORIES.MCP_SERVERS));
+  server.tool("getSelfHostingDocs", "Get self-hosting documentation.", {}, async () => fetchDoc(DOC_CATEGORIES.SELF_HOSTING));
+  server.tool("getUpdatesDocs", "Get MeetingBaas product updates and changelog.", {}, async () => fetchDoc(DOC_CATEGORIES.UPDATES));
 
-  server.tool(
-    "getWebhooksDocs",
-    "Get Webhooks documentation (v2 reference).",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.WEBHOOKS)
-  );
-
-  server.tool("getSdkDocs", "Get MeetingBaas SDK overview documentation.", {}, async () =>
-    fetchDoc(DOC_CATEGORIES.SDK)
-  );
-
-  server.tool(
-    "getTypeScriptSdkDocs",
-    "Get TypeScript SDK documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.TYPESCRIPT_SDK)
-  );
-
-  server.tool(
-    "getTranscriptSeekerDocs",
-    "Get Transcript Seeker documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.TRANSCRIPT_SEEKER)
-  );
-
-  server.tool(
-    "getSpeakingBotsDocs",
-    "Get Speaking Bots documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.SPEAKING_BOTS)
-  );
-
-  server.tool(
-    "getMcpServersDocs",
-    "Get MCP servers documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.MCP_SERVERS)
-  );
-
-  server.tool(
-    "getSelfHostingDocs",
-    "Get self-hosting documentation.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.SELF_HOSTING)
-  );
-
-  server.tool(
-    "getUpdatesDocs",
-    "Get MeetingBaas product updates and changelog.",
-    {},
-    async () => fetchDoc(DOC_CATEGORIES.UPDATES)
-  );
-
-  // Discouraged: the full dump is large; prefer a scoped category.
+  // Everything — very large; last resort.
   server.tool(
     "getAllDocs",
-    "Get ALL MeetingBaas documentation in one bundle. WARNING: very large (~800 KB) — prefer a scoped tool like getApiDocs or getApiV2BotsDocs. Only use when you genuinely need everything.",
+    "Get ALL docs in one bundle. WARNING: ~200k tokens — almost never the right tool. Prefer getApiDocs + a section tool / getDocsPage.",
     {},
     async () => fetchDoc(DOC_CATEGORIES.ALL)
   );
@@ -318,11 +329,9 @@ Note: ${DOC_CATEGORIES.ALL} exists but is very large — prefer a scoped categor
   // Generic by-category fetch.
   (server as any).tool(
     "getDocsByCategory",
-    "Get documentation by category name. Prefer v2 categories (api-v2, api-v2/bots, …); `api` is legacy v1.",
+    "Get a documentation category bundle by name. Prefer v2 (api-v2, api-v2/bots, …); `api` is legacy v1.",
     {
-      category: z
-        .enum(ALL_CATEGORY_VALUES)
-        .describe("The documentation category to fetch (v2-first; `api` is legacy v1)"),
+      category: z.enum(ALL_CATEGORY_VALUES).describe("Category to fetch (v2-first; `api` is legacy v1)"),
     },
     async ({ category }: { category: string }) => fetchDoc(category)
   );

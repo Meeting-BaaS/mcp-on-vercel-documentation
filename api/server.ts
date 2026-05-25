@@ -8,13 +8,15 @@ const handler = initializeMcpApiHandler(
   },
   {
     instructions:
-      "This server returns MeetingBaas documentation as markdown bundles. " +
-      "ALWAYS use the v2 API (api-v2) — call getApiDocs (which returns v2) and the " +
-      "getApiV2*Docs sub-tools (getApiV2BotsDocs, getApiV2CalendarsDocs, " +
-      "getApiV2WebhooksDocs, getApiV2CallbacksDocs, getApiV2ZoomCredentialsDocs). " +
-      "Only use getApiV1Docs if the user explicitly asks about the legacy v1 API. " +
-      "Prefer narrowly-scoped category tools over getAllDocs, which is very large. " +
-      "For 'how do I send a bot?' start with getApiV2BotsDocs.",
+      "This server returns MeetingBaas documentation. ALWAYS use the v2 API (api-v2); " +
+      "only use getApiV1Docs if the user explicitly asks about legacy v1. " +
+      "Work narrow-to-wide to stay fast: 1) getApiDocs returns a small INDEX of v2 " +
+      "sections + endpoints with links; 2) getDocsPage({ slug }) fetches ONE endpoint " +
+      "(cheapest); 3) a section tool (getApiV2BotsDocs, …CalendarsDocs, …WebhooksDocs, " +
+      "…CallbacksDocs, …ZoomCredentialsDocs) returns a whole section. " +
+      "AVOID getApiV2FullDocs (~90k tokens) and getAllDocs (~200k) unless truly needed. " +
+      "Each result includes Source: links — cite them. " +
+      "For 'how do I send a bot?': getApiDocs, then getDocsPage or getApiV2BotsDocs.",
     capabilities: {
       tools: ({
         // Documentation Category Tools
@@ -30,7 +32,17 @@ const handler = initializeMcpApiHandler(
         },
         getApiDocs: {
           description:
-            "Get the MeetingBaas API documentation — the CURRENT v2 API (always prefer this)",
+            "Get a small INDEX of the v2 API (sections + endpoints + links) — start here",
+          category: "Documentation",
+        },
+        getDocsPage: {
+          description:
+            "Fetch a SINGLE doc page by slug (cheapest); get slugs from getApiDocs",
+          category: "Documentation",
+        },
+        getApiV2FullDocs: {
+          description:
+            "Full v2 API reference in one bundle (~90k tokens; last resort)",
           category: "Documentation",
         },
         getApiV2BotsDocs: {
