@@ -18,7 +18,7 @@
             pname = "mcp-on-vercel-documentation";
             version = "0.1.0";
             src = ./.;
-            nativeBuildInputs = [ pkgs.nodejs_20 pkgs.pnpm_8 pkgs.pnpmConfigHook pkgs.makeWrapper ];
+            nativeBuildInputs = [ pkgs.nodejs_22 pkgs.pnpm_8 pkgs.pnpmConfigHook pkgs.makeWrapper ];
             pnpmDeps = (pkgs.fetchPnpmDeps.override { pnpm = pkgs.pnpm_8; }) {
               inherit (finalAttrs) pname version src;
               fetcherVersion = 2;
@@ -36,7 +36,7 @@
               mkdir -p "$dir"
               cp -a . "$dir"/
               find "$dir" -xtype l -delete
-              makeWrapper ${pkgs.nodejs_20}/bin/node $out/bin/mcp-on-vercel-documentation \
+              makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/mcp-on-vercel-documentation \
                 --chdir "$dir" \
                 --add-flags "-r dotenv/config $dir/dist/server.js"
               runHook postInstall
