@@ -21,8 +21,8 @@
             nativeBuildInputs = [ pkgs.nodejs_22 pkgs.pnpm_8 pkgs.pnpmConfigHook pkgs.makeWrapper ];
             pnpmDeps = (pkgs.fetchPnpmDeps.override { pnpm = pkgs.pnpm_8; }) {
               inherit (finalAttrs) pname version src;
-              fetcherVersion = 2;
-              hash = "sha256-4OV9V14Giahcgu9VJ7PaPHra2jAXFxn7BFqO8aam8FY=";
+              fetcherVersion = 3;
+              hash = "sha256-jNY0CFIcO72ybzJOTOeNHdtMc0RVU/qs667rSOhKr+E=";
             };
             env = { CI = "true"; };
             buildPhase = ''
