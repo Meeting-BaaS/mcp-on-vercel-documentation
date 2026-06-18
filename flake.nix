@@ -36,6 +36,10 @@
               mkdir -p "$dir"
               cp -a . "$dir"/
               find "$dir" -xtype l -delete
+              # Don't bake a committed .env into the store — dotenv/config would
+              # otherwise load stale/wrong config at runtime. Real env comes from
+              # the systemd unit / k8s ConfigMap.
+              rm -f "$dir"/.env
               makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/mcp-on-vercel-documentation \
                 --chdir "$dir" \
                 --add-flags "-r dotenv/config $dir/dist/server.js"

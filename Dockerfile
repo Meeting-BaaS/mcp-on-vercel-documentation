@@ -22,5 +22,8 @@ ENV NODE_ENV=production
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 COPY --from=build /app/dist ./dist
+# Drop root: the node image ships an unprivileged `node` user.
+RUN chown -R node:node /app
+USER node
 EXPOSE 3000
 CMD ["node", "-r", "dotenv/config", "dist/server.js"]
